@@ -1,0 +1,4 @@
+# Construction des exécutables (CI) : PyInstaller figé lui aussi.
+-r requirements.txt
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9

@@ -1,0 +1,17 @@
+# Agent de synchro bancaire Vinancia. Versions figées : l'agent manipule des
+# identifiants bancaires, une dépendance ne doit jamais changer à notre insu.
+# Mettre à jour volontairement, en testant (`selftest`), puis publier une version.
+woob==3.7
+keyring==25.7.0
+requests==2.34.2
+cryptography==50.0.2
+# Fenêtre de l'application (WebView2 sous Windows, WebKit sur Mac).
+pywebview==6.2.1
+# Dépendances de modules bancaires Woob (Caisse d'Épargne, Banque Populaire,
+# Société Générale, Crédit Coopératif…), non installées par Woob lui-même.
+python-jose==3.5.0
+chompjs==1.4.1
+schwifty==2026.10.1
+pycryptodome==4.2.0
+pycryptodomex==3.24.1
+xlrd==2.0.2
