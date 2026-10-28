@@ -27,10 +27,10 @@ import requests
 
 from agent_payload import (  # noqa: F401
     INVESTMENT_KINDS, build_account, collect_investments, collect_transactions, history_since,
-    split_credentials, type_names,
+    redact, remember_secret, remember_secrets, split_credentials, type_names,
 )
 
-AGENT_VERSION = '2.0.0'
+AGENT_VERSION = '2.0.1'
 DEFAULT_API_URL = 'https://myfinances-production.up.railway.app'
 WEB_URL = 'https://vinancia.com'
 # Dépôt public où sont publiées les versions de l'agent (exécutables + empreintes).
@@ -348,6 +348,7 @@ def open_backend(w, bank, password, interactive):
         params['login'] = bank['login']
     if password:
         params['password'] = password
+    remember_secrets(params)
     backend = w.build_backend(bank['module'], params, storage=w.storage, name=bank['name'])
     # request_information non vide = « un humain est là » : le module peut alors
     # déclencher un SMS ou une validation appli. Vide (mode planifié), il lève
@@ -875,6 +876,13 @@ def forget_everything(cfg):
         os.remove(_config_path())
 
 
+class _RedactingFormatter(logging.Formatter):
+    """Passe chaque ligne (traces comprises) par `redact` avant de l'écrire."""
+
+    def format(self, record):
+        return redact(super().format(record))
+
+
 def setup_logging(to_file):
     handlers = []
     if to_file:
@@ -886,6 +894,8 @@ def setup_logging(to_file):
     else:
         handlers.append(logging.StreamHandler())
     # WARNING au minimum : les journaux de Woob en DEBUG contiendraient des pages bancaires.
-    logging.basicConfig(level=logging.WARNING, handlers=handlers,
-                        format='%(asctime)s %(levelname)s %(message)s')
+    formatter = _RedactingFormatter('%(asctime)s %(levelname)s %(message)s')
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    logging.basicConfig(level=logging.WARNING, handlers=handlers)
 

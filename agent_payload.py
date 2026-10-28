@@ -4,6 +4,7 @@ Mise en forme du lot envoyé à Vinancia, sans dépendre de Woob (testable seul)
 Les objets Woob (comptes, opérations) sont lus par simple getattr : les tests
 passent de faux objets, l'agent passe les vrais.
 """
+import re
 import hashlib
 from datetime import date, datetime, timedelta
 
@@ -194,3 +195,44 @@ def serialize_field(value):
         if not field['default'] and field['choices']:
             field['default'] = field['choices'][0]['value']
     return field
+
+
+# ─── Journaux sans secrets ────────────────────────────────────────────────────
+# Les messages d'erreur des banques et les traces peuvent citer un identifiant, un code
+# reçu par SMS ou un numéro de compte. Le journal (sync.log) est celui qu'un utilisateur
+# nous envoie en cas de souci : il ne doit rien contenir de sensible.
+
+_known_secrets = set()
+_SECRET_KEY_HINTS = ('login', 'pass', 'secret', 'key', 'token', 'pin', 'otp', 'code')
+_ASSIGNMENT_RE = re.compile(
+    r'(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|otp|code|authorization)\b(\s*[=:]\s*)(bearer\s+)?[^\s,;&\'"]+'
+)
+_AGENT_TOKEN_RE = re.compile(r'vna_[A-Za-z0-9_\-]+')
+_LONG_DIGITS_RE = re.compile(r'\b\d{8,}\b')
+_EMAIL_RE = re.compile(r'[\w.+\-]+@([\w\-]+\.[\w.\-]+)')
+
+
+def remember_secret(value):
+    """Mémorise une valeur secrète (identifiant, mot de passe…) pour la masquer partout."""
+    text = str(value or '')
+    if len(text) >= 4:
+        _known_secrets.add(text)
+
+
+def remember_secrets(params):
+    """Mémorise les valeurs sensibles d'un dictionnaire de paramètres de banque."""
+    for key, value in (params or {}).items():
+        if isinstance(value, str) and any(hint in str(key).lower() for hint in _SECRET_KEY_HINTS):
+            remember_secret(value)
+
+
+def redact(text):
+    """Masque secrets connus, jetons, mots de passe affectés, longs numéros et e-mails."""
+    out = str(text)
+    for secret in sorted(_known_secrets, key=len, reverse=True):
+        out = out.replace(secret, '***')
+    out = _AGENT_TOKEN_RE.sub('vna_***', out)
+    out = _ASSIGNMENT_RE.sub(lambda m: f'{m.group(1)}{m.group(2)}***', out)
+    out = _LONG_DIGITS_RE.sub(lambda m: '*' * (len(m.group(0)) - 4) + m.group(0)[-4:], out)
+    out = _EMAIL_RE.sub(lambda m: '***@' + m.group(1), out)
+    return out
