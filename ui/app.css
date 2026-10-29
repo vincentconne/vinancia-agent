@@ -180,3 +180,52 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
 
 ::-webkit-scrollbar { width: 10px; }
 ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }
+
+.done-head { display: flex; gap: 14px; align-items: center; margin-bottom: 14px; }
+.check.sm { width: 46px; height: 46px; margin: 0; flex: none; animation: none; }
+.check.sm svg { width: 22px; height: 22px; }
+.done-head h1 { font-size: 21px; margin: 0 0 2px; }
+.done-head .lead { font-size: 13.5px; margin: 0; }
+.accts { flex: none; list-style: none; margin: 0; padding: 0; background: var(--raised); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.acct { display: flex; align-items: center; gap: 12px; padding: 11px 14px; }
+.acct + .acct { border-top: 1px solid var(--line); }
+.acct-ico { flex: none; width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; font-weight: 700; font-size: 14px; color: var(--accent-soft); background: rgba(96, 165, 250, 0.12); }
+.acct-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.acct-main b { font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-main > span { color: var(--muted); font-size: 12.5px; }
+.acct-warn { color: #fbbf24; }
+.acct-tech { margin-top: 4px; font-size: 12px; color: var(--subtle); }
+.acct-tech summary { cursor: pointer; }
+.acct-tech p { margin: 4px 0 0; word-break: break-word; user-select: text; }
+.acct-bal { font-weight: 700; font-size: 14px; white-space: nowrap; }
+.note.soft { margin-top: 10px; }
+.callout.warn { background: rgba(251, 191, 36, 0.10); border-color: rgba(251, 191, 36, 0.35); margin-bottom: 12px; }
+.actions-bar { position: sticky; bottom: -24px; margin: 18px -24px -24px; padding: 16px 24px 24px; background: linear-gradient(to top, var(--surface) 72%, rgba(11, 18, 33, 0)); }
+
+.bank-pick { width: 100%; text-align: left; color: inherit; font: inherit; }
+.bank-pick:hover { border-color: var(--line-strong); }
+.bank-pick .info b { display: block; }
+
+/* Écran de fin : blocs séparés, chacun respire */
+.done-head { margin-bottom: 20px; }
+.stats.stats-2, .stats.stats-3 { margin: 0 0 20px; gap: 12px; }
+.stats.stats-3 { grid-template-columns: repeat(3, 1fr); }
+.stats .stat { padding: 14px 16px; }
+.stats .stat b { font-size: 26px; line-height: 1.1; margin-bottom: 4px; }
+.cards { display: flex; flex-direction: column; gap: 12px; margin-bottom: 22px; }
+.todo, .good { display: flex; gap: 14px; align-items: flex-start; border-radius: 18px; padding: 16px; }
+.todo { background: rgba(37, 99, 235, 0.12); border: 1px solid rgba(96, 165, 250, 0.35); }
+.good { background: rgba(52, 211, 153, 0.08); border: 1px solid rgba(52, 211, 153, 0.25); }
+.todo b, .good b { display: block; font-size: 15px; margin-bottom: 4px; }
+.todo p, .good p { color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+.todo-ico, .good-ico { flex: none; width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center; }
+.todo-ico { background: rgba(96, 165, 250, 0.18); color: var(--accent-soft); }
+.good-ico { background: rgba(52, 211, 153, 0.16); color: var(--gain); }
+.todo-ico svg, .good-ico svg { width: 18px; height: 18px; }
+.section-title { margin: 0 0 12px; }
+.acct { padding: 14px 16px; gap: 14px; }
+.note.soft { margin-top: 12px; line-height: 1.5; }
+.note.secure { margin-top: 22px; align-items: flex-start; line-height: 1.5; }
+.note.secure svg { margin-top: 2px; }
+.actions-bar .btn-row { margin-top: 12px; }
+.actions-bar { margin-top: 22px; }

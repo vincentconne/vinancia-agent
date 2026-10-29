@@ -28,10 +28,31 @@ LOGO_DIR = os.path.join(UI_DIR, 'logos')
 # Seules adresses que la page peut faire ouvrir dans le navigateur.
 OPENABLE = {
     'budget': f'{core.WEB_URL}/budget',
+    'accounts': f'{core.WEB_URL}/accounts',
     'review': core.review_url(),
     'agent': f'{core.WEB_URL}/agent',
     'privacy': f'{core.WEB_URL}/privacy#synchro-bancaire',
 }
+
+
+# Libellés des types de compte (identiques à ceux que Vinancia range : voir services/bank_sync.KIND_POLICY).
+KIND_LABELS = {
+    'checking': 'Compte courant', 'joint': 'Compte joint', 'livret_a': 'Livret A', 'ldds': 'LDDS', 'pel': 'PEL',
+    'cel': 'CEL', 'livret_b': 'Livret', 'csl': 'Livret', 'savings': 'Épargne', 'deposit': 'Dépôt',
+    'market': 'Compte-titres', 'pea': 'PEA', 'life_insurance': 'Assurance vie', 'capitalisation': 'Capitalisation',
+    'per': 'PER', 'perp': 'PER', 'perco': 'PER', 'madelin': 'PER', 'article_83': 'PER', 'pee': 'Épargne salariale',
+    'loan': 'Crédit', 'card': 'Carte', 'unknown': 'Autre',
+}
+UNTRACKED_KINDS = {'loan', 'card', 'unknown'}   # connus mais pas suivis par Vinancia (crédits, cartes…)
+
+
+def format_balance(value):
+    """« 1 234,56 € » (ou chaîne vide si la banque ne donne pas de solde)."""
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return ''
+    return f'{amount:,.2f}'.replace(',', ' ').replace('.', ',') + ' €'
 
 
 def logo_path(module):
@@ -116,6 +137,7 @@ class Bridge:
             out.append({
                 'key': bank['name'],
                 'name': core.bank_display_name(bank),
+                'module': bank['module'],
                 'logo': logo_path(bank['module']),
                 'status': status.get('status') or 'ok',
                 'message': status.get('message'),
@@ -129,12 +151,34 @@ class Bridge:
         return self._woob
 
     @staticmethod
+    def _account_rows(result):
+        rows = []
+        for a in result.get('_local') or []:
+            kind = a.get('kind') or 'unknown'
+            rows.append({
+                'label': a.get('label') or 'Compte bancaire',
+                'type': KIND_LABELS.get(kind, 'Autre'),
+                'balance': format_balance(a.get('balance')),
+                'operations': a.get('operations') or 0,
+                'history': kind in core.HISTORY_KINDS,
+                'tracked': kind in KIND_LABELS and kind not in UNTRACKED_KINDS,
+                'issue': a.get('issue'),
+            })
+        return rows
+
+    @staticmethod
     def _summary(result, report, cfg):
         names = {b['module']: core.bank_display_name(b) for b in cfg['banks']}
         return {
+            'accounts_detail': Bridge._account_rows(result),
+            'accounts_created': result.get('accounts_created', 0),
+            'accounts_updated': result.get('accounts_updated', 0),
+            'accounts_ignored': result.get('accounts_ignored', 0),
+            'accounts_not_synced': result.get('accounts_not_synced', 0),
             'operations': result.get('expenses_created', 0) + result.get('revenues_created', 0),
             'accounts_pending': result.get('accounts_pending', 0),
             'suggestions': result.get('suggestions_created', 0),
+            'auto_linked': result.get('auto_linked', 0),
             'positions': result.get('positions_created', 0),
             'report': [{'name': names.get(r['bank'], r['bank']), 'status': r['status'], 'message': r['message']}
                        for r in report],
@@ -238,11 +282,12 @@ class Bridge:
                 login, password, params = core.split_credentials(values)
                 params, secrets = core.separate_secrets(params, self._fields.get(module, {}).values())
                 bank = core.new_bank_entry(self._cfg, module, login, params, secrets)
-                accounts = core.test_bank(self._woob_instance(), bank, password, self._interaction)
+                accounts = core.first_collect(self._cfg, self._woob_instance(), bank, password, self._interaction)
                 core.add_bank(self._cfg, bank, password)
                 self._emit('progress', {'text': f'{len(accounts)} compte(s) trouvé(s). Envoi de tes opérations à Vinancia…'})
                 result, report = core.run_sync(self._cfg, interaction=self._interaction, only=[bank['name']],
-                                               progress=lambda text: self._emit('progress', {'text': text}))
+                                               progress=lambda text: self._emit('progress', {'text': text}),
+                                               prefetched={bank['name']: accounts})
                 try:
                     core.install_schedule()
                     self._cfg['schedule_installed'] = True
@@ -252,6 +297,24 @@ class Bridge:
             self._emit('done', {**self._summary(result, report, self._cfg), 'kind': 'connect',
                                 'accounts': len(accounts), 'banks': self._banks_view()})
         self._background(work)
+
+    def diagnostic(self):
+        """Texte à copier pour le support (sans aucun secret)."""
+        return {'text': core.diagnostic_report(core.load_config())}
+
+    def known_banks(self):
+        """Banques que Vinancia connaît déjà pour ce compte : proposées après une réinstallation pour les reconnecter."""
+        if self._cfg.get('hide_known_banks') or not core.is_connected():
+            return []
+        have = {b['module'] for b in self._cfg['banks']}
+        names = dict(core.COMMON_BANKS)
+        return [{'id': m, 'name': names[m], 'logo': logo_path(m)}
+                for m in core.Api(self._cfg).known_banks() if m in names and m not in have]
+
+    def dismiss_known_banks(self):
+        self._cfg['hide_known_banks'] = True
+        core.save_config(self._cfg)
+        return {'ok': True}
 
     def sync_now(self):
         def work():

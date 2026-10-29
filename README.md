@@ -36,7 +36,7 @@ et de cliquer sur « Synchroniser maintenant ».
 - **Données envoyées** : comptes, soldes et opérations, sans numéro de compte ni IBAN
   (chaque compte est désigné par une empreinte opaque).
 - **Accès de l'application** : elle ne peut qu'envoyer des opérations, pas lire tes
-  données Vinancia. Tu peux la délier depuis Vinancia (Budget → Synchro bancaire) ou
+  données Vinancia. Tu peux la délier depuis Vinancia (Comptes → Synchroniser mes banques) ou
   depuis l'application (« Délier cet ordinateur »).
 - **Versions** : chaque version est construite par GitHub Actions à partir des
   sources de ce dépôt et publiée avec ses empreintes SHA-256 (`SHA256SUMS.txt`).

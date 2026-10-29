@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import platform
+import re
 import plistlib
 import shutil
 import subprocess
@@ -30,7 +31,7 @@ from agent_payload import (  # noqa: F401
     redact, remember_secret, remember_secrets, split_credentials, type_names,
 )
 
-AGENT_VERSION = '2.0.1'
+AGENT_VERSION = '2.0.2'
 DEFAULT_API_URL = 'https://myfinances-production.up.railway.app'
 WEB_URL = 'https://vinancia.com'
 # Dépôt public où sont publiées les versions de l'agent (exécutables + empreintes).
@@ -107,6 +108,11 @@ class Interaction:
 
 
 # ─── Fichiers locaux ─────────────────────────────────────────────────────────
+
+def is_android():
+    """Vrai dans l'application Android (Chaquopy : platform.system() y répond « Linux »)."""
+    return bool(os.environ.get('VINANCIA_ANDROID'))
+
 
 def agent_dir():
     system = platform.system()
@@ -336,7 +342,7 @@ def bank_fields(loaded_module):
     return fields
 
 
-def open_backend(w, bank, password, interactive):
+def open_backend(w, bank, password, interactive, fresh=False):
     params = dict(bank.get('params') or {})
     # Champs secrets : en mémoire pendant le test d'ajout, dans le trousseau ensuite.
     params.update(bank.get('secrets') or {})
@@ -350,11 +356,19 @@ def open_backend(w, bank, password, interactive):
         params['password'] = password
     remember_secrets(params)
     backend = w.build_backend(bank['module'], params, storage=w.storage, name=bank['name'])
+    if fresh:
+        # Repart d'une connexion neuve : la session enregistrée (cookies) peut être refusée par la banque.
+        backend.storage.set('browser_state', {})
     # request_information non vide = « un humain est là » : le module peut alors
     # déclencher un SMS ou une validation appli. Vide (mode planifié), il lève
     # NeedInteractive au lieu d'envoyer des codes à l'insu de l'utilisateur.
     if interactive and 'request_information' in backend.config:
         backend.config['request_information'].set({})
+    if bank['module'] == 'cragr':
+        try:
+            _patch_cragr(backend)
+        except Exception as error:  # noqa: BLE001 — sans le correctif, le module marche comme avant
+            log.warning('correctif Crédit Agricole non appliqué : %s', type(error).__name__)
     return backend
 
 
@@ -382,6 +396,206 @@ def fetch_accounts(backend, interaction=None):
     raise AgentError('Trop de questions de sécurité successives.')
 
 
+def http_error_where(error):
+    """« 403 sur host/chemin » (sans paramètres ni données de la requête) pour savoir quelle étape est refusée."""
+    from urllib.parse import urlparse
+
+    response = getattr(error, 'response', None)
+    url = getattr(response, 'url', None) or getattr(getattr(error, 'request', None), 'url', None)
+    if not url:
+        return ''
+    parsed = urlparse(str(url))
+    path = re.sub(r'/\d{4,}', '/…', parsed.path)[:70]
+    status = getattr(response, 'status_code', '')
+    return f'{status} sur {parsed.netloc}{path}'.strip()
+
+
+# ─── Crédit Agricole : parcours « après connexion » ──────────────────────────
+#
+# Après chaque connexion, le site du Crédit Agricole lit GET /bff/api/interstitials/post_authentication_journey_sequence
+# (écrans à afficher avant d'aller plus loin : première connexion, mise à jour KYC…). Le module Woob ne fait pas cet
+# appel ; la banque refuse alors l'accès au détail des comptes (« Interstitial block »). On fait la même lecture que le
+# site, sans jamais valider un écran à la place de l'utilisateur.
+
+CA_JOURNEY_PATH = '/bff/api/interstitials/post_authentication_journey_sequence'
+CA_STEP_LABELS = {
+    'NOTIFICATION-KYC': 'mettre à jour tes informations personnelles',
+    'NOTIFICATION-EAI': 'lire une notification de ta banque',
+    'PREMIERE-CONNEXION': 'accepter les conditions de ton espace en ligne (écran « Bienvenue dans votre espace personnel », bouton « Commencer »)',
+    'PORTAIL-ENTREPRISE': 'passer par le portail entreprise',
+    'PERSONNALISER-CODE-PERSONNEL': 'changer ton code personnel',
+}
+
+
+def ca_journey_steps(data):
+    """Étapes que le Crédit Agricole demande avant d'aller plus loin (codes connus seulement, jamais de donnée perso)."""
+    if not isinstance(data, dict):
+        return []
+    steps = [str(code) for code in (data.get('interstitials') or []) if isinstance(code, str)]
+    if data.get('isKYCRequired') and 'NOTIFICATION-KYC' not in steps:
+        steps.append('NOTIFICATION-KYC')
+    return [code for code in steps if re.fullmatch(r'[A-Z0-9_/-]{2,60}', code)]
+
+
+def ca_steps_message(steps):
+    """Phrase lisible pour l'utilisateur, ou '' si rien n'est demandé."""
+    labels = [CA_STEP_LABELS.get(code, f'valider l’étape « {code} »') for code in steps]
+    if not labels:
+        return ''
+    return ('le Crédit Agricole te demande de ' + ', puis '.join(labels)
+            + ' : connecte-toi sur credit-agricole.fr (le site, pas l’appli), fais-le, puis relance la synchro.')
+
+
+def _patch_cragr(backend):
+    """Ajoute au navigateur du module cragr la lecture du parcours après connexion, avant l'ouverture du détail."""
+    browser = backend.browser
+    original = getattr(browser, '_open_detail_dav', None)
+    if original is None or getattr(browser, '_vna_patched', False):
+        return
+
+    def open_detail(account):
+        if getattr(browser, '_vna_journey', None) is None:
+            try:
+                browser._vna_journey = browser.open(browser.BASEURL + CA_JOURNEY_PATH).json()
+            except Exception as error:  # noqa: BLE001 — le détail est tenté quand même
+                log.warning('parcours Crédit Agricole illisible : %s', type(error).__name__)
+                browser._vna_journey = {}
+        return original(account)
+
+    browser._open_detail_dav = open_detail
+    browser._vna_patched = True
+
+
+# Encodages que libxml2 sait lire sans iconv (cas d'Android) ; les autres sont convertis en UTF-8 avant analyse.
+LIBXML_NATIVE_ENCODINGS = frozenset({'utf-8', 'utf8', 'ascii', 'us-ascii', 'iso-8859-1', 'latin1', 'latin-1'})
+
+
+def _to_utf8(content, encoding, native):
+    """Contenu ré-encodé en UTF-8 si libxml2 ne connaît pas `encoding`, sinon None (rien à faire)."""
+    if not encoding or encoding.lower() in native:
+        return None
+    try:
+        return content.decode(encoding).encode('utf-8')
+    except (LookupError, UnicodeDecodeError):
+        return None
+
+
+def ensure_dist_stub(name, version, directory):
+    """
+    Déclare un paquet Python « installé » sans l'être : crée `<directory>/<name>-<version>.dist-info/METADATA` et
+    ajoute `directory` à `sys.path`. Woob refuse de charger un module bancaire dont le `requirements.txt` cite un
+    paquet absent (`importlib.metadata.distribution`), même quand le code du module ne l'importe jamais. Utilisé sur
+    Android pour `chompjs` (extension C sans version Android) : Caisse d'Épargne et Banque Populaire n'en importent
+    rien, seule la liste de dépendances le réclame. Si un module en avait réellement besoin, l'import échouerait
+    proprement à l'usage.
+    """
+    info = os.path.join(directory, f'{name}-{version}.dist-info')
+    os.makedirs(info, exist_ok=True)
+    meta = os.path.join(info, 'METADATA')
+    if not os.path.exists(meta):
+        with open(meta, 'w', encoding='utf-8') as fh:
+            fh.write(f'Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n')
+    if directory not in sys.path:
+        sys.path.append(directory)
+    return info
+
+
+def patch_lxml_encodings(native=LIBXML_NATIVE_ENCODINGS):
+    """Pages Woob XML / HTML d'un encodage inconnu de libxml2 (windows-1252 sur Android) : converties en UTF-8."""
+    from io import BytesIO
+
+    import lxml.etree
+    from woob.browser import pages
+
+    if getattr(pages.XMLPage.build_doc, '_vna_patched', False):
+        return
+    xml_build, html_build = pages.XMLPage.build_doc, pages.HTMLPage.build_doc
+
+    def build_xml(self, content):
+        data = _to_utf8(content, self.encoding, native)
+        if data is None:
+            return xml_build(self, content)
+        data = re.sub(rb'^(\s*<\?xml[^>]*?encoding=["\'])[^"\']*', rb'\1utf-8', data, count=1)
+        return lxml.etree.parse(BytesIO(data), lxml.etree.XMLParser(encoding='utf-8', resolve_entities=False))
+
+    def build_html(self, content):
+        data = _to_utf8(content, self.encoding, native)
+        if data is None:
+            return html_build(self, content)
+        saved = self.response.encoding
+        self.response.encoding = 'utf-8'
+        try:
+            return html_build(self, data)
+        finally:
+            self.response.encoding = saved
+
+    build_xml._vna_patched = build_html._vna_patched = True
+    pages.XMLPage.build_doc = build_xml
+    pages.HTMLPage.build_doc = build_html
+
+
+def bank_requires_step(error):
+    """True si la banque répond qu'une étape obligatoire (« interstitiel » : message à lire, consentement,
+    mise à jour de ses informations…) doit d'abord être faite sur son site ou son appli."""
+    response = getattr(error, 'response', None)
+    try:
+        return 'interstitial' in (response.text or '')[:500].lower() if response is not None else False
+    except Exception:
+        return False
+
+
+def http_error_debug(error, backend=None):
+    """Éléments utiles pour comprendre un refus (403…) SANS valeur secrète : noms des en-têtes envoyés, noms et
+    domaines des cookies, début de la réponse de la banque (passé par `redact`)."""
+    parts = []
+    request = getattr(error, 'request', None) or getattr(getattr(error, 'response', None), 'request', None)
+    if request is not None:
+        wanted = ('x-xsrf-token', 'origin', 'referer', 'cookie', 'content-type')
+        sent = sorted(name.lower() for name in getattr(request, 'headers', {}).keys() if name.lower() in wanted)
+        parts.append('en-têtes : ' + (', '.join(sent) or 'aucun'))
+    try:
+        cookies = sorted({f'{c.name}@{(c.domain or "").lstrip(".")}' for c in backend.browser.session.cookies})
+        parts.append('cookies : ' + (', '.join(cookies)[:260] or 'aucun'))
+    except Exception:  # noqa: BLE001 — simple aide au diagnostic
+        pass
+    body = getattr(getattr(error, 'response', None), 'text', '') or ''
+    snippet = redact(re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', body))).strip()[:120]
+    if snippet:
+        parts.append(f'réponse : {snippet}')
+    return ' ; '.join(parts)
+
+
+def _safe_connected():
+    try:
+        return 'oui' if is_connected() else 'non'
+    except Exception:  # noqa: BLE001 — trousseau indisponible : on le dit plutôt que de planter
+        return 'inconnu (trousseau indisponible)'
+
+
+def diagnostic_report(cfg, log_lines=60):
+    """Rapport à copier pour le support : versions, état de chaque banque, fin du journal. Tout passe par `redact` :
+    ni identifiant, ni mot de passe, ni jeton, ni numéro de compte n'y figure."""
+    system = 'Android' if is_android() else platform.system()
+    lines = [
+        f'Vinancia Agent {AGENT_VERSION} · {system} · Python {platform.python_version()}',
+        f'Relié à Vinancia : {_safe_connected()}',
+        'Banques :',
+    ]
+    for bank in cfg.get('banks') or []:
+        status = (cfg.get('status') or {}).get(bank['name'], {})
+        when = str(status.get('at') or 'jamais')[:16]
+        lines.append(f"- {bank['module']} : {status.get('status') or '?'} ({when}) {status.get('message') or ''}".rstrip())
+    if not cfg.get('banks'):
+        lines.append('- aucune')
+    try:
+        with open(os.path.join(agent_dir(), 'sync.log'), encoding='utf-8', errors='replace') as f:
+            tail = f.read().splitlines()[-log_lines:]
+        lines += ['', f'Journal (dernières lignes) :'] + tail
+    except OSError:
+        lines += ['', 'Journal : vide']
+    return redact('\n'.join(lines))
+
+
 def classify_error(error):
     from woob import exceptions as e
 
@@ -400,7 +614,13 @@ def classify_error(error):
     if isinstance(error, e.ModuleLoadError):
         return 'error', 'Module bancaire incompatible : mets à jour Vinancia Agent.'
     if isinstance(error, requests.RequestException):
-        return 'error', 'Pas de connexion Internet.'
+        # Tout problème d'accès au site de la banque (réseau coupé, certificat, délai, redirections…) arrive ici :
+        # on donne le type d'erreur plutôt que d'affirmer « pas d'Internet » à tort.
+        detail = redact(str(error))[:140]
+        step = getattr(error, 'vna_step', None)
+        where = f' à l’étape « {step} »' if step else ''
+        where_http = http_error_where(error)
+        return 'error', f'Connexion à la banque impossible{where} ({where_http or type(error).__name__}) : {detail}'
     return 'error', f'{type(error).__name__}: {error}'[:200]
 
 
@@ -486,31 +706,90 @@ def new_bank_entry(cfg, module, login, params, secrets=None):
             'secrets': secrets or {}}
 
 
-def _collect_bank(w, bank, salt, kinds, interaction, last_sync_iso, backfill=()):
+def _collect_accounts(backend, bank, salt, kinds, interaction, last_sync_iso, backfill=()):
+    """Comptes, opérations et positions d'une banque déjà connectée, au format envoyé à Vinancia.
+
+    Une étape refusée par la banque (403…) n'empêche plus le reste : le compte arrive avec son solde, et
+    `_issue` (local, retiré avant l'envoi) dit ce qui manque et pourquoi.
+    """
     from agent_payload import account_ref
 
-    backend = open_backend(w, bank, _bank_password(bank), interactive=interaction is not None)
     try:
         accounts = fetch_accounts(backend, interaction)
-        out = []
-        for account in accounts:
-            kind = kinds.get(getattr(account, 'type', None), 'unknown')
-            # Vinancia redemande tout l'historique d'un compte tout juste relié.
-            full = last_sync_iso is None or account_ref(salt, bank['module'], getattr(account, 'id', '')) in backfill
-            since = history_since(None if full else last_sync_iso)
-            txs = collect_transactions(backend.iter_history(account), since) if kind in HISTORY_KINDS else []
-            investments = None
-            if kind in INVESTMENT_KINDS and hasattr(backend, 'iter_investment'):
-                try:
-                    investments = collect_investments(backend.iter_investment(account))
-                except NotImplementedError:
-                    investments = None   # la banque ne détaille pas les positions : solde seul
-            out.append(build_account(salt, bank['module'], account, kinds, txs, full_history=full,
-                                     investments=investments))
-        return out
+    except requests.RequestException as error:
+        error.vna_step = 'liste des comptes'
+        raise
+    out = []
+    for account in accounts:
+        kind = kinds.get(getattr(account, 'type', None), 'unknown')
+        # Vinancia redemande tout l'historique d'un compte tout juste relié.
+        full = last_sync_iso is None or account_ref(salt, bank['module'], getattr(account, 'id', '')) in backfill
+        since = history_since(None if full else last_sync_iso)
+        issue = None
+        txs = []
+        if kind in HISTORY_KINDS:
+            try:
+                txs = collect_transactions(backend.iter_history(account), since)
+            except requests.RequestException as error:
+                log.warning('%s : historique refusé (%s)', bank['name'], type(error).__name__, exc_info=True)
+                issue = (f'opérations refusées par la banque ({http_error_where(error) or type(error).__name__}) ; '
+                         + http_error_debug(error, backend))
+                if bank_requires_step(error):
+                    steps = ca_journey_steps(getattr(getattr(backend, 'browser', None), '_vna_journey', None))
+                    issue = ((ca_steps_message(steps) + ' ') if steps else
+                             'ta banque demande une étape obligatoire avant de montrer les opérations : ouvre son site, '
+                             'connecte-toi et valide le message affiché, puis relance la synchro. ') + issue
+                    if steps:
+                        issue += ' ; étapes demandées : ' + ', '.join(steps)
+                full = False   # l'historique complet sera redemandé à la prochaine synchro
+        investments = None
+        if kind in INVESTMENT_KINDS and hasattr(backend, 'iter_investment'):
+            try:
+                investments = collect_investments(backend.iter_investment(account))
+            except NotImplementedError:
+                investments = None   # la banque ne détaille pas les positions : solde seul
+            except requests.RequestException as error:
+                log.warning('%s : positions refusées (%s)', bank['name'], type(error).__name__, exc_info=True)
+                issue = f'positions refusées par la banque ({http_error_where(error) or type(error).__name__})'
+        entry = build_account(salt, bank['module'], account, kinds, txs, full_history=full, investments=investments)
+        if issue:
+            entry['_issue'] = issue
+        out.append(entry)
+    return out
+
+
+def _collect_bank(w, bank, salt, kinds, interaction, last_sync_iso, backfill=()):
+    for attempt in (1, 2):
+        backend = open_backend(w, bank, _bank_password(bank), interactive=interaction is not None,
+                               fresh=attempt == 2)
+        try:
+            return _collect_accounts(backend, bank, salt, kinds, interaction, last_sync_iso, backfill)
+        except requests.RequestException as error:
+            # Refus du site de la banque (403…) : souvent la session enregistrée. Un seul nouvel essai, connexion neuve.
+            if attempt == 2:
+                raise
+            log.warning('%s : %s, nouvel essai avec une connexion neuve', bank['name'], type(error).__name__)
+        finally:
+            # Sauvegarde la session (cookies, appareil reconnu) : c'est ce qui évite de
+            # refaire la double authentification à chaque synchro.
+            with contextlib.suppress(Exception):
+                backend.deinit()
+
+
+def first_collect(cfg, w, bank, password, interaction):
+    """
+    Ajout d'une banque : se connecte UNE fois et lit tout (comptes, historique, positions) dans la même session.
+    Se reconnecter juste après (session enregistrée) fait refuser la requête par certaines banques (403).
+    """
+    from woob.capabilities.bank import Account
+
+    api = Api(cfg)
+    salt = cfg.get('account_salt') or api.ping()['account_salt']
+    cfg['account_salt'] = salt
+    backend = open_backend(w, bank, password, interactive=True)
+    try:
+        return _collect_accounts(backend, bank, salt, type_names(Account), interaction, None)
     finally:
-        # Sauvegarde la session (cookies, appareil reconnu) : c'est ce qui évite de
-        # refaire la double authentification à chaque synchro.
         with contextlib.suppress(Exception):
             backend.deinit()
 
@@ -533,7 +812,7 @@ def sync_lock():
             os.remove(path)
 
 
-def run_sync(cfg, interaction=None, only=None, progress=None):
+def run_sync(cfg, interaction=None, only=None, progress=None, prefetched=None):
     """
     Synchronise toutes les banques (ou seulement `only`) et envoie le lot à Vinancia.
     Renvoie (réponse du serveur, compte rendu par banque).
@@ -564,23 +843,33 @@ def run_sync(cfg, interaction=None, only=None, progress=None):
             if progress:
                 progress(f'Connexion à {bank_display_name(bank)}…')
             try:
-                ensure_module(w, bank['module'])
-                accounts += _collect_bank(w, bank, salt, kinds, interaction, cfg['last_sync'].get(bank['name']),
-                                          backfill=set(cfg.get('backfill') or []))
+                if prefetched and bank['name'] in prefetched:
+                    accounts += prefetched[bank['name']]   # déjà lu dans la même connexion (ajout d'une banque)
+                else:
+                    ensure_module(w, bank['module'])
+                    accounts += _collect_bank(w, bank, salt, kinds, interaction, cfg['last_sync'].get(bank['name']),
+                                              backfill=set(cfg.get('backfill') or []))
                 status, message = 'ok', None
                 synced.append(bank['name'])
             except Cancelled:
                 raise
             except Exception as error:
                 status, message = classify_error(error)
-                log.warning('%s : %s', bank['name'], message)
+                log.warning('%s : %s', bank['name'], message, exc_info=True)
             report.append({'bank': bank['module'], 'status': status, 'message': message})
             cfg['status'][bank['name']] = {'status': status, 'message': message,
                                            'at': datetime.now(timezone.utc).isoformat()}
 
         if progress:
             progress('Envoi à Vinancia…')
-        result = api.sync({'agent_version': AGENT_VERSION, 'accounts': accounts, 'report': report})
+        outgoing = [{k: v for k, v in a.items() if not k.startswith('_')} for a in accounts]
+        result = api.sync({'agent_version': AGENT_VERSION, 'accounts': outgoing, 'report': report})
+        # Détail local (jamais renvoyé ni stocké) : ce que l'appli montre à l'utilisateur après une synchro.
+        result['_local'] = [
+            {'bank': a['bank'], 'label': a['label'], 'kind': a['kind'], 'balance': a['balance'],
+             'operations': len(a['transactions']), 'issue': a.get('_issue')}
+            for a in accounts
+        ]
         cfg['backfill'] = list(result.get('full_history_refs') or [])
         for name in synced:
             cfg['last_sync'][name] = today
@@ -617,14 +906,28 @@ class Api:
     def ping(self):
         return self._json(requests.get(f'{self.url}/api/bank-agent/ping', headers=self._headers(), timeout=30))
 
+    def known_banks(self):
+        """Modules des banques déjà synchronisées pour ce compte (vide en cas de souci : simple confort)."""
+        try:
+            body = self._json(requests.get(f'{self.url}/api/bank-agent/ping', headers=self._headers(), timeout=8))
+        except Exception:  # noqa: BLE001
+            return []
+        return [b['module'] for b in body.get('known_banks') or [] if isinstance(b, dict) and b.get('module')]
+
     def sync(self, payload):
         return self._json(requests.post(f'{self.url}/api/bank-agent/sync', json=payload,
                                         headers=self._headers(), timeout=120))
 
+    @staticmethod
+    def _device():
+        if is_android():
+            return {'label': os.environ.get('VINANCIA_DEVICE') or 'Mon téléphone', 'platform': 'Android'}
+        return {'label': platform.node() or 'Mon ordinateur', 'platform': platform.system()}
+
     def pair_start(self):
         return self._json(requests.post(
             f'{self.url}/api/bank-agent/pair/start',
-            json={'label': platform.node() or 'Mon ordinateur', 'platform': platform.system()},
+            json=self._device(),
             headers=self._headers(auth=False), timeout=30,
         ))
 
@@ -635,8 +938,8 @@ class Api:
 
 
 def review_url():
-    """Page Vinancia où l'utilisateur relie / remplace / ajoute ses comptes à valider."""
-    return f'{WEB_URL}/budget?synchro=valider'
+    """Page Comptes de Vinancia où l'utilisateur relie / remplace / ajoute ses comptes à valider (ouvre la modale Synchro bancaire)."""
+    return f'{WEB_URL}/accounts?synchro=valider'
 
 
 def pairing_url(user_code):

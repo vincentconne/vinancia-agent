@@ -129,6 +129,28 @@ function showPicker() {
   q.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const b = grid.querySelector('.bank-tile'); if (b) b.click(); } });
 }
 
+// Banques que Vinancia connaît déjà pour ce compte (synchro précédente) : proposées après une réinstallation.
+function remainingKnown() {
+  const have = new Set((state.banks || []).map((b) => b.module));
+  return (state.known || []).filter((b) => !have.has(b.id));
+}
+
+function showReconnect() {
+  const list = remainingKnown();
+  const many = list.length > 1;
+  render(`
+    <h1>Content de te revoir !</h1>
+    <p class="lead">Tu synchronisais déjà ${many ? 'ces banques' : 'cette banque'} avec Vinancia. Reconnecte-${many ? 'les' : 'la'} en quelques secondes :
+      tes comptes et ton historique sont déjà dans Vinancia, rien ne sera dupliqué.</p>
+    <div class="stack" style="margin-top:18px">
+      ${list.map((b) => `<button type="button" class="bank-row bank-pick" data-action="pick" data-arg="${esc(b.id)}">${logo(b, 'lg')}
+        <div class="info"><b>${esc(b.name)}</b><span class="muted small">Reconnecter</span></div></button>`).join('')}
+    </div>
+    <div class="grow"></div>
+    <button class="btn btn-ghost" data-action="picker">Ajouter une autre banque</button>
+    <button class="link" style="margin-top:6px" data-action="skip-known">Plus tard</button>`);
+}
+
 function showForm(bank) {
   const fields = bank.fields.map((f) => {
     const input = f.type === 'select'
@@ -152,30 +174,98 @@ function showForm(bank) {
   $screen.querySelectorAll('#bank-form input').forEach((el) => el.addEventListener('keydown', (e) => { if (e.key === 'Enter') ACTIONS.connect(bank.id); }));
 }
 
+// Les comptes trouvés chez la banque : nom, type, solde et ce qui en est repris. Affiché seulement sur cet écran
+// (rien de plus que ce que la banque montre déjà à l'utilisateur ; ça ne quitte pas l'appareil).
+function accountsList(r) {
+  const rows = r.accounts_detail || [];
+  if (!rows.length) return '';
+  const items = rows.map((a) => {
+    let status = '';
+    let tech = '';
+    if (a.issue) { status = '<span class="acct-warn">Opérations indisponibles pour l’instant</span>'; tech = a.issue; }
+    else if (!a.tracked) status = 'Non suivi par Vinancia';
+    else if (a.history) status = a.operations ? `${a.operations} opération(s) lue(s)` : 'Aucune opération lue';
+    else status = 'Solde suivi';
+    const detail = tech ? `<details class="acct-tech"><summary>Détail technique</summary><p>${esc(tech)}</p></details>` : '';
+    return `<li class="acct"><span class="acct-ico" aria-hidden="true">${esc((a.type || '?').charAt(0))}</span>`
+      + `<div class="acct-main"><b>${esc(a.label)}</b><span>${esc(a.type)} · ${status}</span>${detail}</div>`
+      + `<div class="acct-bal">${esc(a.balance)}</div></li>`;
+  }).join('');
+  const hasHistory = rows.some((a) => a.history);
+  const issues = rows.filter((a) => a.issue).length;
+  const note = issues
+    ? '<p class="note soft">Les soldes sont bien suivis. Les opérations seront réessayées à la prochaine synchro.</p>'
+    : r.operations === 0
+    ? `<p class="note soft">${hasHistory
+      ? 'Ta banque n’a renvoyé aucune opération pour tes comptes courants.'
+      : 'Seuls les comptes courants remontent leurs opérations ; les livrets et placements remontent leur solde.'}</p>`
+    : '';
+  return `<ul class="accts">${items}</ul>${note}`;
+}
+
 function showDone(r) {
-  const notes = [];
-  if (r.accounts_pending) notes.push(`<b>${r.accounts_pending} compte(s)</b> ressemble(nt) à des comptes que tu as déjà dans Vinancia : relier, remplacer ou ajouter ?`);
-  if (r.suggestions) notes.push(`<b>${r.suggestions} opération(s)</b> ressemble(nt) à des dépenses que tu avais saisies : même dépense ou pas ?`);
-  const pendingNote = notes.length ? `<div class="callout">👉 ${notes.join('<br>')}</div>` : '';
+  const plural = (n, one, many) => `${n} ${n > 1 ? many : one}`;
+  const todo = [];
+  if (r.accounts_pending) {
+    todo.push({
+      title: plural(r.accounts_pending, 'compte à relier', 'comptes à relier'),
+      text: r.accounts_pending > 1
+        ? 'Ils ressemblent à des comptes que tu as déjà dans Vinancia : les relier, les remplacer ou les ajouter ?'
+        : 'Il ressemble à un compte que tu as déjà dans Vinancia : le relier, le remplacer ou l’ajouter ?',
+    });
+  }
+  if (r.suggestions) {
+    todo.push({
+      title: plural(r.suggestions, 'opération à comparer', 'opérations à comparer'),
+      text: `${r.suggestions > 1 ? 'Elles ressemblent' : 'Elle ressemble'} à ${r.suggestions > 1 ? 'des dépenses' : 'une dépense'} que tu avais saisie${r.suggestions > 1 ? 's' : ''}. Rendez-vous sur Vinancia, où tu vois tes saisies : même dépense ou pas ?`,
+    });
+  }
+  const todoCards = todo.map((t) => `
+    <div class="todo">
+      <span class="todo-ico" aria-hidden="true">${ICON.eye}</span>
+      <div><b>${t.title}</b><p>${t.text}</p></div>
+    </div>`).join('');
+  const autoCard = r.auto_linked ? `
+    <div class="good">
+      <span class="good-ico" aria-hidden="true">${ICON.checkSm}</span>
+      <div><b>${plural(r.auto_linked, 'opération reliée', 'opérations reliées')} d’office</b>
+      <p>Même jour, même montant qu’une dépense que tu avais saisie : rien n’est compté en double.</p></div>
+    </div>` : '';
   const toReview = r.accounts_pending || r.suggestions;
+  const failed = (r.report || []).filter((x) => x.status !== 'ok');
+  const failNote = failed.length
+    ? `<div class="callout warn">⚠️ ${failed.map((x) => `<b>${esc(x.name)}</b> : ${esc(x.message || 'échec')}`).join('<br>')}</div>`
+    : '';
+  const stats = [
+    { n: r.accounts, label: r.accounts > 1 ? (failed.length ? 'comptes trouvés' : 'comptes reliés') : (failed.length ? 'compte trouvé' : 'compte relié') },
+    { n: r.operations, label: r.operations > 1 ? 'opérations importées' : 'opération importée' },
+  ];
+  if (r.positions) stats.push({ n: r.positions, label: r.positions > 1 ? 'positions suivies' : 'position suivie' });
+  const statCards = stats.map((x) => `<div class="stat"><b>${x.n}</b><span>${x.label}</span></div>`).join('');
+  const accounts = accountsList(r);
   render(`
-    <div class="check">${ICON.check}</div>
-    <h1>C’est prêt !</h1>
-    <p class="lead">Tes opérations arrivent maintenant dans Vinancia toutes les 6 heures, même fenêtre fermée.</p>
-    <div class="stats">
-      <div class="stat"><b>${r.accounts}</b><span>compte(s) relié(s)</span></div>
-      <div class="stat"><b>${r.operations}</b><span>opération(s) importée(s)</span></div>
-      ${r.positions ? `<div class="stat wide"><b>${r.positions}</b><span>position(s) de placement suivie(s) : actions, ETF, fonds</span></div>` : ''}
+    <div class="done-head">
+      <div class="check sm">${ICON.check}</div>
+      <div>
+        <h1>${failed.length ? 'Connecté, mais l’import a échoué' : 'C’est prêt !'}</h1>
+        <p class="lead">${failed.length
+          ? 'Ta banque est ajoutée, mais la première synchro n’a pas abouti. Réessaie depuis l’accueil.'
+          : 'Tes comptes se mettent à jour toutes les 6 heures, même fenêtre fermée.'}</p>
+      </div>
     </div>
-    ${pendingNote}
-    <p class="note" style="margin-top:14px">${ICON.lock}Envoyé à Vinancia : soldes, opérations et positions. Jamais tes identifiants ni ton IBAN.</p>
-    <div class="grow"></div>
-    ${toReview
-      ? '<button class="btn btn-primary" data-action="open" data-arg="review">Vérifier dans Vinancia</button>'
-      : '<button class="btn btn-primary" data-action="open" data-arg="budget">Voir mon budget</button>'}
-    <div class="btn-row" style="margin-top:10px">
-      <button class="btn btn-secondary" data-action="picker">Ajouter une banque</button>
-      <button class="btn btn-secondary" data-action="home">Terminer</button>
+    ${failNote}
+    <div class="stats stats-${stats.length}">${statCards}</div>
+    ${todoCards || autoCard ? `<div class="cards">${todoCards}${autoCard}</div>` : ''}
+    ${accounts ? `<h2 class="section-title">Tes comptes</h2>${accounts}` : ''}
+    <p class="note secure">${ICON.lock}<span>Envoyé à Vinancia : soldes, opérations et positions. Jamais tes identifiants ni ton IBAN.</span></p>
+    <div class="actions-bar">
+      ${toReview
+        ? `<button class="btn btn-primary" data-action="open" data-arg="review">${r.suggestions ? 'Comparer dans Vinancia' : 'Vérifier dans Vinancia'}</button>`
+        : '<button class="btn btn-primary" data-action="open" data-arg="accounts">Voir mes comptes</button>'}
+      <div class="btn-row">
+        <button class="btn btn-secondary" data-action="add-bank">Ajouter une banque</button>
+        <button class="btn btn-secondary" data-action="home">Terminer</button>
+      </div>
     </div>`, { center: false });
 }
 
@@ -202,7 +292,7 @@ function showHome() {
     <div class="grow"></div>
     <button class="btn btn-primary" data-action="sync">${ICON.sync}Synchroniser maintenant</button>
     <button class="btn btn-secondary" data-action="open" data-arg="budget" style="margin-top:10px">${ICON.ext}Ouvrir Vinancia</button>
-    <div class="footer"><span>${esc(state.user || '')}</span><span><button class="link" data-action="open" data-arg="privacy">Sécurité</button><button class="link danger" data-action="unlink">Délier cet ordinateur</button></span></div>`);
+    <div class="footer"><span>${esc(state.user || '')}</span><span><button class="link" data-action="open" data-arg="privacy">Sécurité</button><button class="link" data-action="diagnostic">Diagnostic</button><button class="link danger" data-action="unlink">Délier cet ordinateur</button></span></div>`);
 }
 
 // ─── Fenêtres de dialogue (code SMS, validation sur téléphone…) ──────────────
@@ -268,7 +358,11 @@ async function refresh() {
   state = { ...state, ...(await api.init()) };
   document.getElementById('version').textContent = `v${state.version}`;
   if (!state.connected) return showWelcome();
-  if (!state.banks.length) return showPicker();
+  if (!state.banks.length) {
+    // Appli (ré)installée : on propose d'abord les banques déjà synchronisées avec ce compte Vinancia.
+    state.known = await api.known_banks();
+    return remainingKnown().length ? showReconnect() : showPicker();
+  }
   return showHome();
 }
 
@@ -280,11 +374,31 @@ const ACTIONS = {
     showPairing(r);
   },
   reopen() { api.reopen_pairing(); },
+  async diagnostic() {
+    const { text } = await api.diagnostic();
+    modal(`
+      <h3>Diagnostic</h3>
+      <p class="muted small">Rapport sans mot de passe, identifiant ni numéro de compte. Copie-le et envoie-le au support si une banque pose problème.</p>
+      <textarea id="m-diag" readonly rows="10" spellcheck="false" style="margin-top:12px;width:100%;background:var(--field);color:var(--ink);border:1px solid var(--line-strong);border-radius:12px;padding:10px;font:12px/1.4 ui-monospace,Menlo,monospace;user-select:text">${esc(text)}</textarea>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn btn-secondary" id="m-close">Fermer</button>
+        <button class="btn btn-primary" id="m-copy">Copier</button>
+      </div>`, (s) => {
+      s.querySelector('#m-close').onclick = closeModal;
+      s.querySelector('#m-copy').onclick = async () => {
+        const area = s.querySelector('#m-diag');
+        try { await navigator.clipboard.writeText(area.value); toast('Diagnostic copié.', 'info'); }
+        catch (e) { area.select(); document.execCommand('copy'); toast('Diagnostic copié.', 'info'); }
+      };
+    });
+  },
+  'add-bank'() { return remainingKnown().length ? showReconnect() : showPicker(); },
+  async 'skip-known'() { await api.dismiss_known_banks(); state.known = []; showPicker(); },
   'cancel-pair'() { api.cancel_pairing(); showWelcome(); },
   token() {
     modal(`
       <h3>Jeton d’agent</h3>
-      <p class="muted">Colle le jeton créé dans Vinancia (Budget → Synchro bancaire → avancé).</p>
+      <p class="muted">Colle le jeton créé dans Vinancia (Comptes → Synchroniser mes banques → avancé).</p>
       <input type="password" id="m-input" style="margin-top:16px" placeholder="vna_…">
       <div class="btn-row" style="margin-top:16px">
         <button class="btn btn-secondary" id="m-cancel">Annuler</button>
