@@ -236,3 +236,8 @@ def redact(text):
     out = _LONG_DIGITS_RE.sub(lambda m: '*' * (len(m.group(0)) - 4) + m.group(0)[-4:], out)
     out = _EMAIL_RE.sub(lambda m: '***@' + m.group(1), out)
     return out
+
+
+def lock_is_fresh(mtime, now, max_age=30 * 60):
+    """Un verrou de synchro compte comme « en cours » tant qu'il a moins de `max_age` secondes (au-delà, il est périmé)."""
+    return mtime is not None and 0 <= now - mtime < max_age

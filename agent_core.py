@@ -27,11 +27,12 @@ import keyring
 import requests
 
 from agent_payload import (  # noqa: F401
+    lock_is_fresh,
     INVESTMENT_KINDS, build_account, collect_investments, collect_transactions, history_since,
     redact, remember_secret, remember_secrets, split_credentials, type_names,
 )
 
-AGENT_VERSION = '2.0.2'
+AGENT_VERSION = '2.0.3'
 DEFAULT_API_URL = 'https://myfinances-production.up.railway.app'
 WEB_URL = 'https://vinancia.com'
 # Dépôt public où sont publiées les versions de l'agent (exécutables + empreintes).
@@ -112,6 +113,11 @@ class Interaction:
 def is_android():
     """Vrai dans l'application Android (Chaquopy : platform.system() y répond « Linux »)."""
     return bool(os.environ.get('VINANCIA_ANDROID'))
+
+
+def is_ios():
+    """Vrai dans l'application iPhone (platform.system() y répond « iOS »)."""
+    return bool(os.environ.get('VINANCIA_IOS'))
 
 
 def agent_dir():
@@ -372,12 +378,17 @@ def open_backend(w, bank, password, interactive, fresh=False):
     return backend
 
 
-def fetch_accounts(backend, interaction=None):
+def with_interaction(backend, interaction, call):
+    """Exécute `call()` ; si la banque demande un code, une validation ou une redirection, pose la question à
+    l'utilisateur (fenêtre ouverte) puis recommence. Sans fenêtre (synchro planifiée), l'exception remonte.
+
+    La banque peut redemander une authentification forte à N'IMPORTE QUELLE étape (liste des comptes, historique de
+    plus de 90 jours, positions) : toutes les lectures passent donc par ici."""
     from woob.exceptions import BrowserQuestion, BrowserRedirect, DecoupledValidation
 
     for _ in range(6):
         try:
-            return list(backend.iter_accounts())
+            return call()
         except BrowserQuestion as question:
             if interaction is None:
                 raise
@@ -394,6 +405,10 @@ def fetch_accounts(backend, interaction=None):
                 raise
             backend.config['auth_uri'].set(interaction.redirect(redirect.url))
     raise AgentError('Trop de questions de sécurité successives.')
+
+
+def fetch_accounts(backend, interaction=None):
+    return with_interaction(backend, interaction, lambda: list(backend.iter_accounts()))
 
 
 def http_error_where(error):
@@ -575,7 +590,7 @@ def _safe_connected():
 def diagnostic_report(cfg, log_lines=60):
     """Rapport à copier pour le support : versions, état de chaque banque, fin du journal. Tout passe par `redact` :
     ni identifiant, ni mot de passe, ni jeton, ni numéro de compte n'y figure."""
-    system = 'Android' if is_android() else platform.system()
+    system = 'Android' if is_android() else 'iPhone' if is_ios() else platform.system()
     lines = [
         f'Vinancia Agent {AGENT_VERSION} · {system} · Python {platform.python_version()}',
         f'Relié à Vinancia : {_safe_connected()}',
@@ -729,7 +744,7 @@ def _collect_accounts(backend, bank, salt, kinds, interaction, last_sync_iso, ba
         txs = []
         if kind in HISTORY_KINDS:
             try:
-                txs = collect_transactions(backend.iter_history(account), since)
+                txs = with_interaction(backend, interaction, lambda: collect_transactions(backend.iter_history(account), since))
             except requests.RequestException as error:
                 log.warning('%s : historique refusé (%s)', bank['name'], type(error).__name__, exc_info=True)
                 issue = (f'opérations refusées par la banque ({http_error_where(error) or type(error).__name__}) ; '
@@ -745,7 +760,7 @@ def _collect_accounts(backend, bank, salt, kinds, interaction, last_sync_iso, ba
         investments = None
         if kind in INVESTMENT_KINDS and hasattr(backend, 'iter_investment'):
             try:
-                investments = collect_investments(backend.iter_investment(account))
+                investments = with_interaction(backend, interaction, lambda: collect_investments(backend.iter_investment(account)))
             except NotImplementedError:
                 investments = None   # la banque ne détaille pas les positions : solde seul
             except requests.RequestException as error:
@@ -794,15 +809,21 @@ def first_collect(cfg, w, bank, password, interaction):
             backend.deinit()
 
 
+def sync_in_progress():
+    """Une synchro tourne-t-elle (fenêtre OU tâche planifiée) ? Lu dans le verrou, sans rien modifier."""
+    try:
+        mtime = os.path.getmtime(os.path.join(agent_dir(), 'sync.lock'))
+    except OSError:
+        return False
+    return lock_is_fresh(mtime, time.time())
+
+
 @contextlib.contextmanager
 def sync_lock():
     """Une seule synchro à la fois (fenêtre et tâche planifiée partagent les sessions)."""
     path = os.path.join(agent_dir(), 'sync.lock')
-    try:
-        if time.time() - os.path.getmtime(path) < 30 * 60:
-            raise AgentError('Une synchro est déjà en cours.')
-    except FileNotFoundError:
-        pass
+    if sync_in_progress():
+        raise AgentError('Une synchro est déjà en cours.')
     with open(path, 'w') as f:
         f.write(str(os.getpid()))
     try:
@@ -922,6 +943,8 @@ class Api:
     def _device():
         if is_android():
             return {'label': os.environ.get('VINANCIA_DEVICE') or 'Mon téléphone', 'platform': 'Android'}
+        if is_ios():
+            return {'label': os.environ.get('VINANCIA_DEVICE') or 'Mon iPhone', 'platform': 'iPhone'}
         return {'label': platform.node() or 'Mon ordinateur', 'platform': platform.system()}
 
     def pair_start(self):

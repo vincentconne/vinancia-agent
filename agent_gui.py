@@ -193,7 +193,12 @@ class Bridge:
             'user': self._cfg.get('user'),
             'version': core.AGENT_VERSION,
             'banks': self._banks_view(),
+            'syncing': core.sync_in_progress(),
         }
+
+    def sync_state(self):
+        """Pour la page : une synchro (même lancée en arrière-plan) est-elle en cours ? + état des banques."""
+        return {'syncing': core.sync_in_progress(), 'banks': self._banks_view()}
 
     def catalog(self):
         return [{'id': module, 'name': name, 'logo': logo_path(module)} for module, name in core.COMMON_BANKS]

@@ -10,6 +10,7 @@ const $screen = document.getElementById('screen');
 const $layer = document.getElementById('layer');
 let api = null;
 let state = { connected: false, banks: [], catalog: [] };
+let screen = '';           // écran affiché (pour ne rafraîchir que l'accueil)
 let pending = null;        // opération longue en cours : { kind, onDone }
 
 // ─── Outils ──────────────────────────────────────────────────────────────────
@@ -38,6 +39,7 @@ function logo(bank, size = '') {
 }
 
 function render(html, { center = false } = {}) {
+  screen = '';
   $screen.className = `screen${center ? ' center' : ''}`;
   $screen.innerHTML = html;
   const first = $screen.querySelector('[autofocus]');
@@ -271,6 +273,7 @@ function showDone(r) {
 
 function showHome() {
   const problems = state.banks.filter((b) => b.status !== 'ok');
+  const syncing = !!state.syncing;
   const rows = state.banks.map((b) => `
     <div class="bank-row">
       ${logo(b)}
@@ -279,20 +282,21 @@ function showHome() {
       <button class="icon-btn" data-action="remove" data-arg="${esc(b.key)}" aria-label="Retirer ${esc(b.name)}">${ICON.trash}</button>
     </div>`).join('');
   render(`
-    <div class="card status ${problems.length ? 'warn' : ''}">
-      <span class="big">${problems.length ? ICON.alert : ICON.checkSm}</span>
+    <div class="card status ${syncing ? '' : problems.length ? 'warn' : ''}" ${syncing ? 'role="status" aria-live="polite"' : ''}>
+      <span class="big">${syncing ? '<div class="spinner sm" aria-hidden="true"></div>' : problems.length ? ICON.alert : ICON.checkSm}</span>
       <div>
-        <b>${problems.length ? 'Une banque demande ton attention' : 'Synchro automatique active'}</b>
-        <p class="muted small">${problems.length ? 'Clique sur « Synchroniser maintenant » pour la valider.' : 'Prochaine synchro dans les 6 heures, même fenêtre fermée.'}</p>
+        <b>${syncing ? 'Synchronisation en cours…' : problems.length ? 'Une banque demande ton attention' : 'Synchro automatique active'}</b>
+        <p class="muted small">${syncing ? 'Tes banques sont en cours de lecture, ça prend quelques secondes.' : problems.length ? 'Clique sur « Synchroniser maintenant » pour la valider.' : 'Prochaine synchro dans les 6 heures, même fenêtre fermée.'}</p>
       </div>
     </div>
     <h2>Mes banques</h2>
     ${rows}
     <button class="btn btn-ghost" data-action="picker" style="margin-top:6px">${ICON.plus}Ajouter une banque</button>
     <div class="grow"></div>
-    <button class="btn btn-primary" data-action="sync">${ICON.sync}Synchroniser maintenant</button>
+    <button class="btn btn-primary" data-action="sync" ${syncing ? 'disabled' : ''}>${ICON.sync}Synchroniser maintenant</button>
     <button class="btn btn-secondary" data-action="open" data-arg="budget" style="margin-top:10px">${ICON.ext}Ouvrir Vinancia</button>
     <div class="footer"><span>${esc(state.user || '')}</span><span><button class="link" data-action="open" data-arg="privacy">Sécurité</button><button class="link" data-action="diagnostic">Diagnostic</button><button class="link danger" data-action="unlink">Délier cet ordinateur</button></span></div>`);
+  screen = 'home';
 }
 
 // ─── Fenêtres de dialogue (code SMS, validation sur téléphone…) ──────────────
@@ -484,6 +488,7 @@ window.agentEvent = (type, data) => {
       if (data.kind === 'connect') { state.banks = data.banks; showDone(data); }
       else {
         state.banks = data.banks;
+        state.syncing = false;
         showHome();
         const failed = data.report.filter((r) => r.status !== 'ok');
         toast(failed.length ? failed.map((r) => `${r.name} : ${r.message}`).join(' · ') : `${data.operations} nouvelle(s) opération(s) envoyée(s) à Vinancia.`, failed.length ? 'error' : 'info');
@@ -504,8 +509,25 @@ window.agentEvent = (type, data) => {
   }
 };
 
+// Une synchro peut démarrer sans toi (tâche automatique toutes les 6 h) : l'accueil le montre, puis se met à jour.
+function watchSync() {
+  setInterval(async () => {
+    if (pending || screen !== 'home' || document.hidden) return;
+    try {
+      const s = await api.sync_state();
+      const was = !!state.syncing;
+      const changed = JSON.stringify(s.banks) !== JSON.stringify(state.banks);
+      if (s.syncing === was && !changed) return;
+      state = { ...state, banks: s.banks, syncing: s.syncing };
+      showHome();
+      if (was && !s.syncing) toast('Synchronisation terminée.', 'info');
+    } catch (e) { /* page en cours de fermeture */ }
+  }, 3000);
+}
+
 function boot() {
   api = window.pywebview.api;
+  watchSync();
   api.catalog().then((c) => { state.catalog = c; refresh(); });
 }
 if (window.pywebview && window.pywebview.api) boot();
