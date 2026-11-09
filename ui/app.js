@@ -271,6 +271,29 @@ function showDone(r) {
     </div>`, { center: false });
 }
 
+// Une banque qui demande une validation (code, appli de la banque) ne peut pas être traitée par la synchro
+// automatique : elle ne dérange jamais. À l'ouverture de l'appli, on propose donc de la valider tout de suite.
+const offeredValidation = new Set();
+function offerValidation() {
+  const waiting = state.banks.filter((b) => b.status === 'needs_2fa');
+  state.banks.filter((b) => b.status === 'ok').forEach((b) => offeredValidation.delete(b.key));
+  const fresh = waiting.filter((b) => !offeredValidation.has(b.key));
+  if (!fresh.length || state.syncing || pending || $layer.innerHTML.trim()) return;
+  fresh.forEach((b) => offeredValidation.add(b.key));
+  const names = waiting.map((b) => esc(b.name)).join(', ');
+  modal(`
+    <div class="phone">${ICON.phone}</div>
+    <h3 style="text-align:center">Validation demandée</h3>
+    <p class="muted" style="text-align:center">${names} demande${waiting.length > 1 ? 'nt' : ''} une validation (code ou confirmation dans l’appli de la banque). Lance la synchro maintenant pour la faire.</p>
+    <div class="stack" style="margin-top:18px">
+      <button class="btn btn-primary" id="m-ok">Valider maintenant</button>
+      <button class="btn btn-ghost" id="m-later">Plus tard</button>
+    </div>`, (sheet) => {
+    sheet.querySelector('#m-ok').onclick = () => { closeModal(); ACTIONS.sync(); };
+    sheet.querySelector('#m-later').onclick = closeModal;
+  });
+}
+
 function showHome() {
   const problems = state.banks.filter((b) => b.status !== 'ok');
   const syncing = !!state.syncing;
@@ -297,6 +320,7 @@ function showHome() {
     <button class="btn btn-secondary" data-action="open" data-arg="budget" style="margin-top:10px">${ICON.ext}Ouvrir Vinancia</button>
     <div class="footer"><span>${esc(state.user || '')}</span><span><button class="link" data-action="open" data-arg="privacy">Sécurité</button><button class="link" data-action="diagnostic">Diagnostic</button><button class="link danger" data-action="unlink">Délier cet ordinateur</button></span></div>`);
   screen = 'home';
+  setTimeout(offerValidation, 0);
 }
 
 // ─── Fenêtres de dialogue (code SMS, validation sur téléphone…) ──────────────

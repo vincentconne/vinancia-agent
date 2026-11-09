@@ -32,7 +32,7 @@ from agent_payload import (  # noqa: F401
     redact, remember_secret, remember_secrets, split_credentials, type_names,
 )
 
-AGENT_VERSION = '2.0.3'
+AGENT_VERSION = '2.0.4'
 DEFAULT_API_URL = 'https://myfinances-production.up.railway.app'
 WEB_URL = 'https://vinancia.com'
 # Dépôt public où sont publiées les versions de l'agent (exécutables + empreintes).
