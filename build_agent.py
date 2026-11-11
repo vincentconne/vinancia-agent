@@ -32,7 +32,7 @@ PACKAGES = [
     'woob', 'jose', 'chompjs', 'schwifty', 'Crypto', 'Cryptodome', 'xlrd', 'lxml', 'PIL',
     'dateutil', 'babel', 'pycountry', 'unidecode', 'html2text', 'yaml', 'requests', 'urllib3',
     'certifi', 'charset_normalizer', 'idna', 'keyring', 'cryptography', 'termcolor', 'rich',
-    'packaging', 'ecdsa', 'rsa', 'pyasn1', 'webview', 'bottle', 'proxy_tools',
+    'packaging', 'ecdsa', 'rsa', 'pyasn1', 'webview', 'bottle', 'proxy_tools', 'websockets',
 ]
 # Distributions dont Woob lit la version (requirements.txt des modules bancaires).
 METADATA = [
@@ -82,6 +82,9 @@ def main():
         '--hidden-import', 'agent_core',
         '--hidden-import', 'agent_payload',
         '--hidden-import', 'pgp_verify',
+        # Module Trade Republic embarqué (chargé par son nom, invisible pour PyInstaller).
+        '--hidden-import', 'tr_client',
+        '--hidden-import', 'vna_traderepublic',
         '--exclude-module', 'selenium',
         '--exclude-module', 'pytest',
         '--exclude-module', 'tkinter',

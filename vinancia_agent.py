@@ -208,6 +208,14 @@ def cmd_selftest(args):
         except Exception as e:
             ok = False
             lines.append(f'{module} ERREUR {type(e).__name__}: {e}')
+    for module in core.LOCAL_MODULES:      # modules embarqués (Trade Republic) : rien à télécharger
+        try:
+            core.bank_fields(core.ensure_module(w, module))
+            import websockets.sync.client  # noqa: F401
+            lines.append(f'{module} (embarqué) OK')
+        except Exception as e:
+            ok = False
+            lines.append(f'{module} (embarqué) ERREUR {type(e).__name__}: {e}')
     text = '\n'.join(lines + ['RESULTAT ' + ('OK' if ok else 'ECHEC')])
     if args.out:
         with open(args.out, 'w', encoding='utf-8') as f:
