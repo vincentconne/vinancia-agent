@@ -32,7 +32,7 @@ from agent_payload import (  # noqa: F401
     redact, remember_secret, remember_secrets, split_credentials, type_names,
 )
 
-AGENT_VERSION = '2.0.4'
+AGENT_VERSION = '2.0.5'
 DEFAULT_API_URL = 'https://myfinances-production.up.railway.app'
 WEB_URL = 'https://vinancia.com'
 # Dépôt public où sont publiées les versions de l'agent (exécutables + empreintes).
@@ -378,7 +378,7 @@ def open_backend(w, bank, password, interactive, fresh=False):
     return backend
 
 
-def with_interaction(backend, interaction, call):
+def with_interaction(backend, interaction, call, step='lecture'):
     """Exécute `call()` ; si la banque demande un code, une validation ou une redirection, pose la question à
     l'utilisateur (fenêtre ouverte) puis recommence. Sans fenêtre (synchro planifiée), l'exception remonte.
 
@@ -386,20 +386,33 @@ def with_interaction(backend, interaction, call):
     plus de 90 jours, positions) : toutes les lectures passent donc par ici."""
     from woob.exceptions import BrowserQuestion, BrowserRedirect, DecoupledValidation
 
+    app_validations = 0
     for _ in range(6):
         try:
             return call()
         except BrowserQuestion as question:
             if interaction is None:
                 raise
+            log.info('code demandé par la banque (étape : %s)', step)
             for field in question.fields:
                 backend.config[field.id].set(interaction.ask(field))
         except DecoupledValidation as validation:
             if interaction is None:
                 raise
+            if app_validations >= 1:
+                # La banque redemande une validation tout de suite après celle de l'utilisateur : chaque nouvelle
+                # tentative lui envoie une nouvelle notification. On s'arrête plutôt que de boucler (et d'exposer
+                # le compte à un blocage de la banque).
+                log.warning('validation redemandée juste après la première (étape : %s) : arrêt', step)
+                raise AgentError('Ta banque redemande une validation juste après la tienne. Je m’arrête pour ne pas '
+                                 't’envoyer de notifications en boucle : réessaie dans quelques minutes, ou ouvre '
+                                 '« Diagnostic » et envoie-moi le rapport.')
+            app_validations += 1
+            log.info('validation demandée par la banque (étape : %s)', step)
             interaction.app_validation(str(validation) or 'Valide la connexion dans l’application de ta banque.')
             if 'resume' in backend.config:
                 backend.config['resume'].set(True)
+            _log_polling_state(backend, step)
         except BrowserRedirect as redirect:
             if interaction is None:
                 raise
@@ -407,8 +420,19 @@ def with_interaction(backend, interaction, call):
     raise AgentError('Trop de questions de sécurité successives.')
 
 
+def _log_polling_state(backend, step):
+    """Aide au diagnostic : après la validation de l'utilisateur, la banque a-t-elle gardé de quoi la reprendre
+    (noms de champs seulement, jamais de valeur) ?"""
+    try:
+        data = getattr(getattr(backend, 'browser', None), 'polling_data', None)
+        keys = sorted(data) if isinstance(data, dict) else type(data).__name__
+        log.info('reprise après validation (étape : %s) : données de reprise %s', step, keys)
+    except Exception:  # noqa: BLE001 — simple aide au diagnostic
+        pass
+
+
 def fetch_accounts(backend, interaction=None):
-    return with_interaction(backend, interaction, lambda: list(backend.iter_accounts()))
+    return with_interaction(backend, interaction, lambda: list(backend.iter_accounts()), step='liste des comptes')
 
 
 def http_error_where(error):
@@ -744,7 +768,7 @@ def _collect_accounts(backend, bank, salt, kinds, interaction, last_sync_iso, ba
         txs = []
         if kind in HISTORY_KINDS:
             try:
-                txs = with_interaction(backend, interaction, lambda: collect_transactions(backend.iter_history(account), since))
+                txs = with_interaction(backend, interaction, lambda: collect_transactions(backend.iter_history(account), since), step='historique')
             except requests.RequestException as error:
                 log.warning('%s : historique refusé (%s)', bank['name'], type(error).__name__, exc_info=True)
                 issue = (f'opérations refusées par la banque ({http_error_where(error) or type(error).__name__}) ; '
@@ -760,7 +784,7 @@ def _collect_accounts(backend, bank, salt, kinds, interaction, last_sync_iso, ba
         investments = None
         if kind in INVESTMENT_KINDS and hasattr(backend, 'iter_investment'):
             try:
-                investments = with_interaction(backend, interaction, lambda: collect_investments(backend.iter_investment(account)))
+                investments = with_interaction(backend, interaction, lambda: collect_investments(backend.iter_investment(account)), step='positions')
             except NotImplementedError:
                 investments = None   # la banque ne détaille pas les positions : solde seul
             except requests.RequestException as error:
@@ -773,15 +797,38 @@ def _collect_accounts(backend, bank, salt, kinds, interaction, last_sync_iso, ba
     return out
 
 
+class _CountingInteraction(Interaction):
+    """Transmet les questions à l'interface en comptant celles qui ont été posées à l'utilisateur."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.asked = 0
+
+    def ask(self, field):
+        self.asked += 1
+        return self.inner.ask(field)
+
+    def app_validation(self, message):
+        self.asked += 1
+        return self.inner.app_validation(message)
+
+    def redirect(self, url):
+        self.asked += 1
+        return self.inner.redirect(url)
+
+
 def _collect_bank(w, bank, salt, kinds, interaction, last_sync_iso, backfill=()):
+    counter = _CountingInteraction(interaction) if interaction is not None else None
     for attempt in (1, 2):
         backend = open_backend(w, bank, _bank_password(bank), interactive=interaction is not None,
                                fresh=attempt == 2)
         try:
-            return _collect_accounts(backend, bank, salt, kinds, interaction, last_sync_iso, backfill)
+            return _collect_accounts(backend, bank, salt, kinds, counter, last_sync_iso, backfill)
         except requests.RequestException as error:
-            # Refus du site de la banque (403…) : souvent la session enregistrée. Un seul nouvel essai, connexion neuve.
-            if attempt == 2:
+            # Refus du site de la banque (403…) : souvent la session enregistrée. Un seul nouvel essai, connexion neuve
+            # — sauf si l'utilisateur vient de valider (code, appli de la banque) : une connexion neuve lui ferait
+            # tout revalider, pour le même résultat.
+            if attempt == 2 or (counter is not None and counter.asked):
                 raise
             log.warning('%s : %s, nouvel essai avec une connexion neuve', bank['name'], type(error).__name__)
         finally:
