@@ -21,8 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 # Modules Woob jamais embarqués sur iPhone : ils exigent pycryptodome (extension C sans version iPhone).
 # (Aucune grande banque : seuls `nef` et `erehsbc` l'utilisent.)
-# Trade Republic : module embarqué qui dépend de `websockets`, pas encore empaqueté ni testé sur iPhone.
-UNSUPPORTED_BANKS = {'nef', 'erehsbc', 'traderepublic'}
+UNSUPPORTED_BANKS = {'nef', 'erehsbc'}
 
 KEYCHAIN_SERVICE = 'com.vinancia.agent'
 _HERE = os.path.dirname(os.path.abspath(__file__))

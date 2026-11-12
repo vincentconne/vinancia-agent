@@ -32,7 +32,7 @@ from agent_payload import (  # noqa: F401
     redact, remember_secret, remember_secrets, split_credentials, type_names,
 )
 
-AGENT_VERSION = '2.1.0'
+AGENT_VERSION = '2.1.1'
 DEFAULT_API_URL = 'https://myfinances-production.up.railway.app'
 WEB_URL = 'https://vinancia.com'
 # Dépôt public où sont publiées les versions de l'agent (exécutables + empreintes).
@@ -74,15 +74,11 @@ COMMON_BANKS = [
     ('bred', 'BRED'),
     ('degiro', 'DEGIRO'),
     ('boursedirect', 'Bourse Direct'),
-    ('traderepublic', 'Trade Republic'),
     ('binance', 'Binance'),
     ('yomoni', 'Yomoni'),
     ('nalo', 'Nalo'),
 ]
 BANK_NAMES = dict(COMMON_BANKS)
-# Établissements sans module Woob : leur module est écrit par nous et EMBARQUÉ dans l'appli (jamais téléchargé).
-# Il a la forme d'un module Woob, pour que tout le reste de l'agent le traite comme une banque ordinaire.
-LOCAL_MODULES = {'traderepublic': 'vna_traderepublic'}
 
 log = logging.getLogger('vinancia_agent')
 
@@ -323,8 +319,6 @@ def ensure_module(w, module, progress=None):
     from woob.exceptions import ModuleInstallError
     from woob.core.repositories import RepositoryUnavailable
 
-    if module in LOCAL_MODULES:
-        return local_module(w, module)
     try:
         minfo = w.repositories.get_module_info(module)
         if minfo is None:
@@ -339,18 +333,6 @@ def ensure_module(w, module, progress=None):
     except ModuleInstallError as e:
         raise AgentError(f'Installation du module bancaire impossible : {e}') from e
     return w.modules_loader.get_or_load_module(module)
-
-
-def local_module(w, module):
-    """Module embarqué (cf. LOCAL_MODULES), chargé une fois par instance de Woob."""
-    import importlib
-
-    from woob.core.modules import LoadedModule
-
-    loaded = w.modules_loader.loaded
-    if module not in loaded:
-        loaded[module] = LoadedModule(importlib.import_module(LOCAL_MODULES[module]))
-    return loaded[module]
 
 
 def bank_fields(loaded_module):
@@ -379,10 +361,7 @@ def open_backend(w, bank, password, interactive, fresh=False):
     if password:
         params['password'] = password
     remember_secrets(params)
-    if bank['module'] in LOCAL_MODULES:
-        backend = local_module(w, bank['module']).create_instance(w, bank['name'], params, w.storage)
-    else:
-        backend = w.build_backend(bank['module'], params, storage=w.storage, name=bank['name'])
+    backend = w.build_backend(bank['module'], params, storage=w.storage, name=bank['name'])
     if fresh:
         # Repart d'une connexion neuve : la session enregistrée (cookies) peut être refusée par la banque.
         backend.storage.set('browser_state', {})
@@ -661,16 +640,8 @@ def classify_error(error):
 
     if isinstance(error, AgentError):
         return 'error', str(error)
-    # Message écrit par un module embarqué (cf. LOCAL_MODULES) : sans secret, plus précis que le texte générique.
-    own = str(error) if getattr(error, 'vna_message', False) and str(error) else None
-    if isinstance(error, e.BrowserUserBanned):
-        return 'blocked', own or 'La banque a refusé la connexion automatique.'
     if isinstance(error, e.BrowserIncorrectPassword):
-        return 'wrong_password', own or 'Identifiant ou mot de passe refusé par la banque.'
-    if isinstance(error, e.AppValidationError):
-        return 'needs_2fa', own or 'La validation dans l’application de ta banque n’a pas abouti : réessaie.'
-    if own:
-        return 'error', own
+        return 'wrong_password', 'Identifiant ou mot de passe refusé par la banque.'
     if isinstance(error, (e.NeedInteractive, e.BrowserQuestion, e.DecoupledValidation, e.BrowserRedirect)):
         return 'needs_2fa', 'Ta banque redemande une validation : clique sur « Synchroniser maintenant ».'
     if isinstance(error, (e.ScrapingBlocked, e.BrowserForbidden, e.BrowserUserBanned)):
@@ -759,10 +730,6 @@ def separate_secrets(params, fields):
 # Aide affichée dans le formulaire pour les établissements qui ne se connectent pas
 # avec un identifiant et un mot de passe.
 BANK_HINTS = {
-    'traderepublic': 'Connexion expérimentale : Trade Republic n’a pas d’accès officiel pour les applications. '
-                     'Entre ton numéro et ton code PIN, puis valide la notification dans l’appli Trade Republic. '
-                     'Lecture seule : aucun ordre ni virement possible. Un seul essai à la fois : après plusieurs '
-                     'échecs, Trade Republic bloque les connexions pendant des heures.',
     'binance': 'Dans Binance : Profil → Gestion des API → Créer une clé, en cochant uniquement '
                '« Lecture » (aucun retrait ni trading). Colle ici la clé API et la clé secrète.',
 }
