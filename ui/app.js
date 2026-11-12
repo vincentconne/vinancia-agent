@@ -294,13 +294,28 @@ function offerValidation() {
   });
 }
 
+/** « le 12/11/2026 à 13:42 » : jour et heure (à la minute) dans le fuseau de l'appareil. Une ancienne valeur (jour seul,
+ *  enregistrée avant la 2.1.2) n'a pas d'heure : on n'affiche alors que la date. Retourne du HTML (morceaux insécables). */
+function syncWhen(iso) {
+  const text = String(iso || '');
+  if (!/^\d{4}-\d{2}-\d{2}/.test(text)) return null;
+  if (!/T\d{2}:\d{2}/.test(text)) return `<span class="nw">le ${text.slice(8, 10)}/${text.slice(5, 7)}/${text.slice(0, 4)}</span>`;
+  const d = new Date(text);
+  if (isNaN(d)) return null;
+  const day = d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  const hour = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  return `<span class="nw">le ${day}</span> <span class="nw">à ${hour}</span>`;
+}
+
 function showHome() {
   const problems = state.banks.filter((b) => b.status !== 'ok');
   const syncing = !!state.syncing;
   const rows = state.banks.map((b) => `
     <div class="bank-row">
       ${logo(b)}
-      <div class="info"><b>${esc(b.name)}</b><span>${b.status === 'ok' ? `Synchronisée ${esc(b.last_sync_label)}` : esc(b.message || 'Action requise')}</span></div>
+      <div class="info"><b>${esc(b.name)}</b>${b.status === 'ok'
+        ? `<span>Synchronisée ${syncWhen(b.last_sync_at) || esc(b.last_sync_label)}</span>`
+        : `<span>${esc(b.message || 'Action requise')}</span><span class="when">${syncWhen(b.last_sync_at) ? `Dernière synchro ${syncWhen(b.last_sync_at)}` : 'Jamais synchronisée'}</span>`}</div>
       <span class="chip ${b.status === 'ok' ? 'ok' : 'warn'}">${b.status === 'ok' ? 'OK' : 'À voir'}</span>
       <button class="icon-btn" data-action="remove" data-arg="${esc(b.key)}" aria-label="Retirer ${esc(b.name)}">${ICON.trash}</button>
     </div>`).join('');
@@ -318,7 +333,7 @@ function showHome() {
     <div class="grow"></div>
     <button class="btn btn-primary" data-action="sync" ${syncing ? 'disabled' : ''}>${ICON.sync}Synchroniser maintenant</button>
     <button class="btn btn-secondary" data-action="open" data-arg="budget" style="margin-top:10px">${ICON.ext}Ouvrir Vinancia</button>
-    <div class="footer"><span>${esc(state.user || '')}</span><span><button class="link" data-action="open" data-arg="privacy">Sécurité</button><button class="link" data-action="diagnostic">Diagnostic</button><button class="link danger" data-action="unlink">Délier cet ordinateur</button></span></div>`);
+    <div class="footer"><span class="who">${esc(state.user || '')}</span><span class="links"><button class="link" data-action="open" data-arg="privacy">Sécurité</button><button class="link" data-action="diagnostic">Diagnostic</button><button class="link danger" data-action="unlink">Délier cet ordinateur</button></span></div>`);
   screen = 'home';
   setTimeout(offerValidation, 0);
 }

@@ -157,9 +157,13 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
 .bank-row .info { flex: 1; min-width: 0; }
 .bank-row .info b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bank-row .info span { color: var(--muted); font-size: 12.5px; }
+.bank-row .info .when { display: block; margin-top: 2px; font-size: 12px; color: var(--subtle); }
+.nw { white-space: nowrap; }
 .icon-btn { width: 34px; height: 34px; border-radius: 10px; border: 0; background: transparent; color: var(--subtle); display: grid; place-items: center; }
 .icon-btn:hover { background: rgba(255, 255, 255, 0.06); color: var(--loss); }
-.footer { display: flex; align-items: center; justify-content: space-between; padding-top: 16px; color: var(--subtle); font-size: 12px; }
+/* Pied de page : l'e-mail au-dessus, les liens centrés dessous et qui passent à la ligne proprement (écran étroit). */
+.footer { display: flex; flex-direction: column; align-items: center; gap: 2px; padding-top: 16px; color: var(--subtle); font-size: 12px; text-align: center; }
+.footer .links { display: flex; flex-wrap: wrap; justify-content: center; column-gap: 12px; }
 
 /* Bandeau de mise à jour */
 .banner { margin: 14px 24px 0; padding: 10px 14px; border-radius: 14px; background: rgba(37, 99, 235, 0.14); border: 1px solid rgba(96, 165, 250, 0.35); display: flex; align-items: center; gap: 10px; font-size: 13px; }

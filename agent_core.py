@@ -32,7 +32,7 @@ from agent_payload import (  # noqa: F401
     redact, remember_secret, remember_secrets, split_credentials, type_names,
 )
 
-AGENT_VERSION = '2.1.1'
+AGENT_VERSION = '2.1.2'
 DEFAULT_API_URL = 'https://myfinances-production.up.railway.app'
 WEB_URL = 'https://vinancia.com'
 # Dépôt public où sont publiées les versions de l'agent (exécutables + empreintes).
@@ -939,8 +939,11 @@ def run_sync(cfg, interaction=None, only=None, progress=None, prefetched=None):
             for a in accounts
         ]
         cfg['backfill'] = list(result.get('full_history_refs') or [])
+        # Date ET heure (UTC) de la dernière synchro réussie de chaque banque : l'écran d'accueil les affiche.
+        # `history_since` et `last_sync_label` lisent aussi bien un jour seul (anciennes valeurs) qu'un horodatage.
+        finished_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         for name in synced:
-            cfg['last_sync'][name] = today
+            cfg['last_sync'][name] = finished_at
         save_config(cfg)
         return result, report
 

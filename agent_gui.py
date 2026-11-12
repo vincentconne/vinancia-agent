@@ -142,6 +142,7 @@ class Bridge:
                 'status': status.get('status') or 'ok',
                 'message': status.get('message'),
                 'last_sync_label': last_sync_label(cfg['last_sync'].get(bank['name'])),
+                'last_sync_at': cfg['last_sync'].get(bank['name']),
             })
         return out
 
