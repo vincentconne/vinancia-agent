@@ -32,7 +32,7 @@ from agent_payload import (  # noqa: F401
     redact, remember_secret, remember_secrets, split_credentials, type_names,
 )
 
-AGENT_VERSION = '2.1.2'
+AGENT_VERSION = '2.1.3'
 DEFAULT_API_URL = 'https://myfinances-production.up.railway.app'
 WEB_URL = 'https://vinancia.com'
 # Dépôt public où sont publiées les versions de l'agent (exécutables + empreintes).
@@ -85,6 +85,14 @@ log = logging.getLogger('vinancia_agent')
 
 class AgentError(Exception):
     """Erreur à montrer telle quelle à l'utilisateur."""
+
+
+class TooSoon(AgentError):
+    """Vinancia accepte une synchro par minute : `retry_after` = secondes à attendre avant de renvoyer."""
+
+    def __init__(self, message, retry_after):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class Cancelled(AgentError):
@@ -880,6 +888,26 @@ def sync_lock():
             os.remove(path)
 
 
+# Attente maximale avant de renvoyer un lot refusé pour « synchro trop rapprochée » (le serveur dit combien : ≤ 60 s).
+MAX_COOLDOWN_WAIT = 65
+
+
+def send_batch(api, payload, progress=None, sleep=time.sleep):
+    """Envoie le lot à Vinancia. Si une autre synchro vient d'arriver (la tâche automatique, ou la tienne il y a
+    moins d'une minute), Vinancia répond « trop rapprochée » avec le délai à attendre : on attend ce délai puis on
+    renvoie UNE fois le même lot. Sans cela, tout ce qui vient d'être lu — y compris la validation que l'utilisateur
+    vient de faire dans l'appli de sa banque — serait perdu et à refaire."""
+    try:
+        return api.sync(payload)
+    except TooSoon as soon:
+        wait = min(max(int(soon.retry_after), 1), MAX_COOLDOWN_WAIT)
+        log.info('synchro trop rapprochée : nouvel envoi dans %s s', wait)
+        if progress:
+            progress(f'Vinancia accepte une synchro par minute : envoi dans {wait} s…')
+        sleep(wait)
+        return api.sync(payload)
+
+
 def run_sync(cfg, interaction=None, only=None, progress=None, prefetched=None):
     """
     Synchronise toutes les banques (ou seulement `only`) et envoie le lot à Vinancia.
@@ -931,7 +959,7 @@ def run_sync(cfg, interaction=None, only=None, progress=None, prefetched=None):
         if progress:
             progress('Envoi à Vinancia…')
         outgoing = [{k: v for k, v in a.items() if not k.startswith('_')} for a in accounts]
-        result = api.sync({'agent_version': AGENT_VERSION, 'accounts': outgoing, 'report': report})
+        result = send_batch(api, {'agent_version': AGENT_VERSION, 'accounts': outgoing, 'report': report}, progress)
         # Détail local (jamais renvoyé ni stocké) : ce que l'appli montre à l'utilisateur après une synchro.
         result['_local'] = [
             {'bank': a['bank'], 'label': a['label'], 'kind': a['kind'], 'balance': a['balance'],
@@ -970,6 +998,8 @@ class Api:
             body = {}
         if response.status_code == 401:
             raise AgentError('Accès refusé par Vinancia : relie de nouveau cet ordinateur.')
+        if response.status_code == 429 and isinstance(body.get('retry_after'), (int, float)):
+            raise TooSoon(body.get('error') or 'Synchro trop rapprochée.', body['retry_after'])
         if response.status_code >= 400 and response.status_code != 404:
             raise AgentError(body.get('error') or f'Erreur Vinancia (HTTP {response.status_code}).')
         return body
